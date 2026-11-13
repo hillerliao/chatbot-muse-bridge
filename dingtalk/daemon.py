@@ -360,8 +360,9 @@ def process_outbox(handler):
         kind = job.get('kind') or 'text'
         text = job.get('text')
         webhook = job.get('session_webhook')
-        if kind != 'text':
-            # 图片/视频/文件发送未实测：不发，直接归档，写明原因。
+        if kind not in ('text', 'markdown'):
+            # 图片/视频/文件直接发送未实测：不发，直接归档，写明原因。
+            # 图片走 markdown：把图放到公开链接上，用 markdown 图片语法发。
             archive(claimed, name, dict(job, status='unsupported',
                                         error='kind=%s send untested' % kind))
             log_line('outbox %s 的 kind=%s 未实测，不发，已归档' % (reply_to, kind))
@@ -392,11 +393,15 @@ def process_outbox(handler):
             continue
         try:
             incoming = reconstruct_message(job)
-            for chunk in chunk_text(text):
-                handler.reply_text(chunk, incoming)
+            if kind == 'markdown':
+                # reply_markdown(title, text, incoming)；text 里可用 ![alt](url) 嵌图片
+                handler.reply_markdown(job.get('title') or 'Muse头像', text, incoming)
+            else:
+                for chunk in chunk_text(text):
+                    handler.reply_text(chunk, incoming)
             archive(claimed, name, dict(job, status='sent',
                                         sent_at=time.strftime('%Y-%m-%dT%H:%M:%S%z')))
-            log_line('已发回钉钉：reply_to=%s（%d 字）' % (reply_to, len(text)))
+            log_line('已发回钉钉：reply_to=%s（%d 字，kind=%s）' % (reply_to, len(text), kind))
         except Exception as e:
             log_line('发回失败（第 %d 次）reply_to=%s：%s' % (attempts, reply_to, e))
             if attempts >= OUTBOX_MAX_ATTEMPTS:
