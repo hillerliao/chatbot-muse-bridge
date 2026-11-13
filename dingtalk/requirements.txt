@@ -1,1 +1,2 @@
 dingtalk-stream==0.24.3
+requests

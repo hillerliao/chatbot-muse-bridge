@@ -5,7 +5,7 @@
     钉钉私聊/群聊 -> 钉钉 Stream -> daemon -> inbox/<message_id>.json
     Muse worker 回复 -> 写 outbox/<message_id>.json -> daemon 发回钉钉
 
-传输（已核实，见 README “核实记录”）：
+传输（已核实）：
     钉钉官方 Stream 模式，出站 WebSocket，不用公网回调地址。
     用官方 SDK dingtalk-stream 0.24.3：
       client = DingTalkStreamClient(Credential(clientId, clientSecret))
@@ -16,10 +16,11 @@
 
 凭证：只读 state/credentials.json {"clientId": "...", "clientSecret": "..."}，
     文件权限 0600。凭证值绝不打进日志，绝不写到别处，代码里没有任何写死的凭证。
-    没有凭证时 daemon 直接退出（exit 2），不发起连接。
+    没有凭证时 daemon 直接退出（exit 2），不假装连接。
 
-文字先行。图片只记 downloadCode，不下载、不转交（尚未验证）；
-文件、语音等其他类型只记类型，不处理。
+文字先行。图片/视频/文件用 downloadCode 换临时下载链接，下载到
+media/incoming/ 供 worker 直接看；语音按钉钉服务端给的 recognition
+转写文字回。超过 20MB 的媒体不下载，只记原因。
 日志只记消息长度和消息 ID，不记正文，不记 sessionWebhook。
 """
 
@@ -40,11 +41,13 @@ OUTBOX = os.path.join(ROOT, 'outbox')
 PROCESSING = os.path.join(ROOT, 'processing')
 SENT = os.path.join(ROOT, 'sent')
 LOGS = os.path.join(ROOT, 'logs')
+MEDIA = os.path.join(ROOT, 'media', 'incoming')
+MAX_MEDIA_BYTES = 20 * 1024 * 1024
 CRED_PATH = os.path.join(STATE, 'credentials.json')
 HEARTBEAT_PATH = os.path.join(STATE, 'heartbeat.json')
 PID_PATH = os.path.join(STATE, 'daemon.pid')
 
-# 回复按 4000 字分片发送。
+# 回复分片长度：只是个保守猜测，不是钉钉核实过的上限，联调后按实测调。
 CHUNK_LIMIT = 4000
 OUTBOX_MAX_ATTEMPTS = 3
 
@@ -118,7 +121,78 @@ def chunk_text(text, limit=CHUNK_LIMIT):
 
 # ---------------------------------------------------------------- SDK 传入
 # 传输层隔离在这里：daemon 其余部分只认 inbox/outbox 文件，不认 SDK。
-# SDK 不可用时直接退出，不发起连接。
+# SDK 不可用时直接退出，不假装连接。
+
+def get_raw_content(msg):
+    """SDK 只解析 text/picture/richText 的 content；audio/video/file 的
+    content 原样落在 msg.extensions['content'] 里（dict 或 JSON 字符串）。"""
+    content = getattr(msg, 'extensions', {}).get('content')
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except ValueError:
+            return {}
+    return content if isinstance(content, dict) else {}
+
+
+def sniff_ext(data, kind):
+    if data[:3] == b'\xff\xd8\xff':
+        return 'jpg'
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return 'png'
+    if data[:6] in (b'GIF87a', b'GIF89a'):
+        return 'gif'
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'webp'
+    if data[:5] == b'#!AMR':
+        return 'amr'
+    if data[:4] == b'SILK':
+        return 'silk'
+    if data[4:8] == b'ftyp':
+        return 'mp4'
+    if data[:4] == b'%PDF':
+        return 'pdf'
+    if data[:2] == b'PK':
+        return 'zip'
+    return {'image': 'jpg', 'video': 'mp4', 'voice': 'amr'}.get(kind, 'bin')
+
+
+def download_media(handler, download_code, msg_id, kind, content):
+    """downloadCode -> 临时下载链接 -> 存到 media/incoming/。返回
+    (相对路径, 错误原因)，失败返回 (None, 原因)。不把 downloadCode、
+    链接、凭证写进日志。"""
+    if not download_code:
+        return None, '没有 downloadCode'
+    try:
+        url = handler.get_image_download_url(download_code)
+    except Exception as e:
+        return None, '换下载链接失败：%s' % e
+    if not url:
+        return None, '换下载链接失败'
+    try:
+        import requests
+        resp = requests.get(url, timeout=60)
+    except Exception as e:
+        return None, '下载失败：%s' % e
+    if resp.status_code != 200:
+        return None, '下载 HTTP %s' % resp.status_code
+    data = resp.content
+    if len(data) > MAX_MEDIA_BYTES:
+        return None, '文件太大（%d 字节，上限 %d）' % (len(data), MAX_MEDIA_BYTES)
+    if not data:
+        return None, '下载到空文件'
+    ext = sniff_ext(data, kind)
+    if kind == 'file':
+        name = content.get('fileName') if isinstance(content, dict) else None
+        if name and '.' in os.path.basename(str(name)):
+            ext = os.path.basename(str(name)).rsplit('.', 1)[-1][:10] or ext
+    rel = 'media/incoming/%s.%s' % (msg_id, ext)
+    path = os.path.join(ROOT, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'wb') as f:
+        f.write(data)
+    return rel, None
+
 
 def build_handler(dingtalk_stream):
     """返回一个 ChatbotHandler 子类实例：收到的消息只写 inbox，不回答。"""
@@ -126,7 +200,15 @@ def build_handler(dingtalk_stream):
     class MuseChatbotHandler(dingtalk_stream.ChatbotHandler):
         async def process(self, callback):
             msg = dingtalk_stream.ChatbotMessage.from_dict(callback.data)
-            record = build_inbox_record(msg)
+            # 群聊（conversation_type=2）只在被 @ 时才收得到；没 @ 的群消息
+            # 钉钉本就不该推过来，万一来了也跳过，不写 inbox、不唤醒 worker。
+            # is_in_at_list 为 None（字段缺失）时按收到处理，不丢消息。
+            if str(getattr(msg, 'conversation_type', '')) == '2' and getattr(msg, 'is_in_at_list', None) is False:
+                log_line('群聊未 @ 的消息，跳过 %s' % getattr(msg, 'message_id', ''))
+                return dingtalk_stream.AckMessage.STATUS_OK, 'OK'
+            record = build_inbox_record(
+                msg,
+                lambda code, mid, kind, content: download_media(self, code, mid, kind, content))
             msg_id = record['message_id']
             inbox_file = os.path.join(INBOX, msg_id + '.json')
             if os.path.exists(inbox_file):
@@ -143,11 +225,13 @@ def build_handler(dingtalk_stream):
     return MuseChatbotHandler()
 
 
-def build_inbox_record(msg):
-    """ChatbotMessage -> inbox 文件内容。只存回复必需的字段。"""
+def build_inbox_record(msg, download_fn=None):
+    """ChatbotMessage -> inbox 文件内容。只存回复必需的字段。
+    图片/视频/文件下载到 media/incoming/，语音按 recognition 转写文字。"""
     msg_id = safe_msg_id(getattr(msg, 'message_id', None))
     msgtype = getattr(msg, 'message_type', None) or 'unknown'
     record_extra = {}
+    content = get_raw_content(msg)
     if msgtype == 'text' and getattr(msg, 'text', None):
         kind, text = 'text', msg.text.content or ''
     elif msgtype == 'richText':
@@ -157,15 +241,59 @@ def build_inbox_record(msg):
         except Exception:
             text = ''
     elif msgtype == 'picture':
-        # 未实测：只记 downloadCode，不下载。worker 拿到也只能看到“有张图”。
         kind = 'image'
         codes = []
         try:
             codes = msg.get_image_list() or []
         except Exception:
             codes = []
-        text = '[图片，未下载]'
+        rel, err = (None, '未下载')
+        if download_fn and codes:
+            rel, err = download_fn(codes[0], msg_id, 'image', content)
+        text = ('[图片，已下载：%s]' % rel) if rel else ('[图片，下载失败：%s]' % err)
         record_extra = {'download_codes': codes}
+        if rel:
+            record_extra['media_path'] = rel
+    elif msgtype == 'audio':
+        kind = 'voice'
+        recognition = (content.get('recognition') or '').strip()
+        duration = content.get('duration')
+        code = content.get('downloadCode')
+        rel = None
+        if download_fn and code:
+            rel, _err = download_fn(code, msg_id, 'voice', content)
+        secs = ('约 %d 秒' % round(duration / 1000)) if isinstance(duration, (int, float)) and duration else ''
+        text = recognition if recognition else '[语音，未识别出文字，请发文字]'
+        if secs:
+            text += '（%s）' % secs
+        record_extra = {'duration_ms': duration}
+        if rel:
+            record_extra['media_path'] = rel
+    elif msgtype == 'video':
+        kind = 'video'
+        code = content.get('downloadCode')
+        duration = content.get('duration')
+        rel, err = (None, '未下载')
+        if download_fn and code:
+            rel, err = download_fn(code, msg_id, 'video', content)
+        secs = ('约 %d 秒' % round(duration / 1000)) if isinstance(duration, (int, float)) and duration else ''
+        text = ('[视频，已下载：%s%s]' % (rel, ('，' + secs) if secs else '')) if rel else ('[视频，下载失败：%s]' % err)
+        record_extra = {'duration_ms': duration}
+        if rel:
+            record_extra['media_path'] = rel
+    elif msgtype == 'file':
+        kind = 'file'
+        code = content.get('downloadCode')
+        name = content.get('fileName') or content.get('file_name') or '未命名文件'
+        size = content.get('fileSize') or content.get('file_size')
+        rel, err = (None, '未下载')
+        if download_fn and code:
+            rel, err = download_fn(code, msg_id, 'file', content)
+        size_txt = ('，%d 字节' % size) if isinstance(size, (int, float)) else ''
+        text = ('[文件：%s%s，已下载：%s]' % (name, size_txt, rel)) if rel else ('[文件：%s%s，下载失败：%s]' % (name, size_txt, err))
+        record_extra = {'file_name': name, 'file_size': size}
+        if rel:
+            record_extra['media_path'] = rel
     else:
         kind, text = 'other', '[不支持的消息类型：%s]' % msgtype
         record_extra = {}
@@ -177,6 +305,7 @@ def build_inbox_record(msg):
         'conversation_id': getattr(msg, 'conversation_id', None),
         'conversation_type': getattr(msg, 'conversation_type', None),
         'conversation_title': getattr(msg, 'conversation_title', None),
+        'is_in_at_list': getattr(msg, 'is_in_at_list', None),
         'type': kind,
         'msgtype': msgtype,
         'text': text,
@@ -333,7 +462,7 @@ def main():
             pass
     atomic_write_json(PID_PATH, {'pid': os.getpid(), 'started_at': STARTED_AT}, 0o644)
 
-    # 凭证：没有就干净退出，不碰网络，不发起连接。
+    # 凭证：没有就干净退出，不碰网络，不假装连接。
     creds = load_credentials()
     if creds is None:
         log_line('no credentials: state/credentials.json 缺 clientId 或 clientSecret，退出')
