@@ -380,6 +380,16 @@ def process_outbox(handler):
                                         error='session webhook expired'))
             log_line('outbox %s 的 session webhook 已过期，发不出去，已归档' % reply_to)
             continue
+        # 去重：同一条消息已发过相同正文就不再发。
+        # 实测一案（2026-11-13 北京天气）：同一 outbox 被写了两次，daemon 在
+        # 16:12:48 和 16:13:09 各发了一次（141 字，内容相同）。
+        # sent/ 里已有 status=sent 且 text 相同的记录时直接丢弃本次任务。
+        already = read_json(os.path.join(SENT, name))
+        if isinstance(already, dict) and already.get('status') == 'sent' and already.get('text') == text:
+            archive(claimed, name, dict(job, status='duplicate',
+                                        error='already sent same text, skipped'))
+            log_line('outbox %s 已发过相同正文，跳过不重发' % reply_to)
+            continue
         try:
             incoming = reconstruct_message(job)
             for chunk in chunk_text(text):
