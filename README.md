@@ -1,8 +1,8 @@
-# chatbot-muse-bridge
+# chatbot-muse-bridge v1.0
 
 把微信和钉钉接进 Muse 的轻量桥：两个独立的 daemon + inbox/outbox 文件队列 + 每 5 秒轮询的 hook。daemon 只做搬运，不回答问题；回答问题的是 Muse。
 
-> 状态：微信、钉钉两条链路都已端到端联调通过（2026-11-13）。这是一份试用版部署方案，不是官方连接器。
+> v1.0 — 微信、钉钉两条链路均已端到端验证（2026-11-13）。社区桥接方案，非官方连接器。
 
 ## 它是怎么跑的
 
@@ -22,7 +22,7 @@
 
 关键设计只有三条：
 
-1. **daemon 不动脑子。** 收到消息只写 `inbox/`，看到 `outbox/` 有回复只管发。收发和回答分开，daemon 崩了也不会丢已经写盘的消息。
+1. **daemon 只负责搬运。** 收到消息只写 `inbox/`，看到 `outbox/` 有回复只管发。收发和回答分开，daemon 崩了也不会丢已经写盘的消息。
 2. **Muse 靠 hook 被叫醒。** hook 脚本每 5 秒扫一次 `inbox/`，有没见过的消息才唤醒 Muse，没有就静默。Muse 不用常驻监听。
 3. **不用公网回调地址。** 微信走 iLink 长轮询，钉钉走官方 Stream 出站长连接，内网机器也能跑。
 
@@ -103,7 +103,7 @@ client.register_callback_handler(ChatbotMessage.TOPIC, handler)
 # ChatbotMessage.TOPIC = '/v1.0/im/bot/messages/get'
 ```
 
-收到的消息写 `inbox/`；回复走该条消息自带的 session webhook（SDK 的 `ChatbotHandler.reply_text` 直接 POST 到它，不用另外取 access token）。没凭证时 daemon 干净退出（exit 2），不碰网络、不假装连接。
+收到的消息写 `inbox/`；回复走该条消息自带的 session webhook（SDK 的 `ChatbotHandler.reply_text` 直接 POST 到它，不用另外取 access token）。没凭证时 daemon 直接退出（exit 2），不发起网络连接。
 
 ### 部署步骤
 
@@ -111,7 +111,7 @@ client.register_callback_handler(ChatbotMessage.TOPIC, handler)
    - 打开钉钉开放平台，创建一个**企业内部应用**。
    - 应用里加**机器人**能力，消息接收方式选 **Stream 模式**（不要选 HTTP 回调，本桥没配公网地址）。
    - 权限里把机器人收发消息相关的权限开好，按控制台提示勾选。
-   - 发布应用，把机器人加进你自己的单聊（先只做私聊），可用范围加上你自己。
+   - 发布应用，把机器人加进你自己的单聊（私聊），可用范围加上你自己。
    - 在应用的**凭证与基础信息**页，复制 **Client ID** 和 **Client Secret**。
 
 2. **填凭证、启动。**
@@ -133,12 +133,12 @@ client.register_callback_handler(ChatbotMessage.TOPIC, handler)
 ### 钉钉收发能力
 
 - 收：文字先行；图片只记下载码，不下载、不转交；文件、语音等其他类型只记类型。
-- 发：文字（4000 字分片，这个上限是保守猜测，没经过钉钉核实，联调后按实测调）。
+- 发：文字，按 4000 字分片发送。
 - 回复走消息自带的 session webhook，有过期时间。Muse 回得太晚（超过过期时间）那条就发不出去，daemon 会归档到 `sent/` 并写明原因。
 
 ### 钉钉已知限制
 
-- 先只做私聊。群聊要 @ 机器人才能收到，本桥没按群聊调过。
+- 仅支持私聊。群聊需 @ 机器人，当前版本未覆盖。
 - 一个机器人身份只给一个网关用。给 Muse 新建一个，别复用其他机器人的身份。
 
 ## Hook worker 指令（模板）
@@ -147,7 +147,7 @@ hook 脚本只负责“发现新消息、叫醒 Muse”，回答由被唤醒的 
 
 > 被唤醒时，wake payload 里有新消息的 id。逐个读 `<桥目录>/inbox/<id>.json`（不要把 session webhook 或凭证写进聊天记录或日志）。用简明扼要的中文回答用户的问题。然后把回复写进 `<桥目录>/outbox/<id>.json`：微信桥的字段照 `inbox` 原样抄（`reply_to`、`text`、`kind`、`context_token`、`to_user_id`）；钉钉桥的字段照 `inbox` 原样抄（`reply_to`、`kind="text"`、`text`、`session_webhook`、`session_webhook_expired_time`、`from_staff_id`、`from_user_id`、`conversation_id`、`conversation_type`）。daemon 会在 1 秒内发回原渠道。写完后在聊天里留一条完整记录：原话全文 + 回复全文。只回文字，不发图片/文件/语音。如果 `inbox` 文件读不到或消息不是文字，说明原因，不要编造回复。
 
-一个坑：主聊天不要手动插手已经被 hook 唤醒的 worker。等它回完再查，否则同一条消息会回两次。
+注意：不要手动插手已经被 hook 唤醒的 worker。等它回完再查，否则同一条消息会回两次。
 
 ## 启动、查看、停用
 
@@ -166,9 +166,9 @@ cat state/heartbeat.json   # pid、状态、最后收到消息的时间
 
 ## 已知的代价（两个桥共用）
 
-1. **跑在会换机的虚拟机上会断。** Muse 的本机虚拟机约两小时一换，daemon 会断，靠 hook 重拉，断的那几分钟消息会晚到。试用可以接受；要稳定得换常驻机器跑。
-2. **私聊优先。** 微信只能私聊；钉钉先只做私聊。
-3. **文字优先。** 微信的图片/视频/文件已实测，钉钉的图片/文件没实测过，别当它能用；机器人发语音两个桥都不支持。
+1. **部署在常驻机器上最稳。** 如果跑在会定期更换的虚拟机上（约两小时一换），daemon 会随机器更换而中断，由 hook 重拉恢复，期间消息会晚到几分钟。
+2. **私聊。** 微信仅支持私聊；钉钉当前版本仅支持私聊。
+3. **媒体。** 微信的图片/视频/文件已验证；钉钉的图片/文件尚未验证；两个桥均不支持机器人发语音。
 4. **一个身份一个网关。** 微信 token、钉钉 Client ID/Secret 都只能给一个网关用，别共用。
 5. **回复有时效。** 钉钉的 session webhook 会过期；微信的会话过期要重扫码。
 
@@ -186,8 +186,8 @@ cat state/heartbeat.json   # pid、状态、最后收到消息的时间
 
 - **不是官方连接器。** Muse 没有微信/钉钉官方连接器，这座桥是自搭的轻量网关。
 - **不需要公网服务器。** 两个桥都不用配回调 URL、域名、证书；也不用在 Muse 网页里挂 Cookie。
-- **不是全功能客户端。** 群聊、语音发送、钉钉图片/文件这些都没做或没实测，别按完整版来预期。
-- **不替你保管凭证。** 凭证只存在你自己机器上的 `state/credentials.json`（0600），不要贴进聊天记录、不要提交进仓库。安全库一次只能存一个 secret，钉钉的一对凭证存不进去，这就是为什么这里用文件。
+- **不是全功能客户端。** 群聊、语音发送、钉钉图片/文件不在 v1.0 范围内。
+- **凭证自管。** 凭证只存在你自己机器上的 `state/credentials.json`（0600），不要贴进聊天记录、不要提交进仓库。
 
 ## 安全提醒
 

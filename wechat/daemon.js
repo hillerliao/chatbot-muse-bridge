@@ -9,7 +9,7 @@
 // 凭证：state/credentials.json 权限 0600，只存 bot_token；不要发给任何人，
 //   不要贴进聊天记录。同一 token 只能一个网关用，别和其他网关共用。
 // 文本先行：收到的图片/视频/文件/语音从 CDN 下载解密，存到 media/incoming/；
-// 发图/视频/文件走上传路径，语音发送暂不支持。
+// 发图/视频/文件走上传路径，语音发送不支持。
 'use strict';
 
 const fs = require('node:fs');
@@ -19,7 +19,7 @@ const crypto = require('node:crypto');
 
 const BASE_URL = 'https://ilinkai.weixin.qq.com';
 const CDN_BASE = 'https://novac2c.cdn.weixin.qq.com/c2c';
-const MAX_MEDIA_BYTES = 20 * 1024 * 1024; // 试用版单文件上限 20MB
+const MAX_MEDIA_BYTES = 20 * 1024 * 1024; // 单文件上限 20MB
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024; // 收到媒体的下载上限，跟 wx-bot 一致；手机发的视频常超 20MB
 const CHANNEL_VERSION = '1.0.0';
 const ROOT = __dirname;
@@ -348,7 +348,7 @@ async function sendReply(token, userId, contextToken, text) {
 
 // ---------- 媒体发送（协议文档 §8：getuploadurl → AES-128-ECB → CDN upload → sendmessage） ----------
 // 图片/视频/文件走同一条上传路径，media_type 1=图片 2=视频 3=文件；
-// 语音（4）公开实现没有稳定的独立发送 helper，暂不支持。
+// 语音（4）公开实现没有稳定的独立发送方法，不支持。
 const MEDIA_TYPES = { image: 1, video: 2, file: 3 };
 
 function md5Hex(buf) { return crypto.createHash('md5').update(buf).digest('hex'); }
@@ -363,7 +363,7 @@ async function uploadMedia(token, toUserId, filePath, mediaType) {
   const WORKSPACE_ROOT = path.join(process.env.HOME || '', 'workspace');
   if (!fp.startsWith(WORKSPACE_ROOT + path.sep)) throw new Error('媒体文件必须在 workspace 内');
   const raw = await fsp.readFile(fp);
-  if (raw.length > MAX_MEDIA_BYTES) throw new Error(`文件太大（${raw.length} 字节），试用版上限 20MB`);
+  if (raw.length > MAX_MEDIA_BYTES) throw new Error(`文件太大（${raw.length} 字节），上限 20MB`);
   const aeskey = crypto.randomBytes(16);
   const aeskeyHex = aeskey.toString('hex');
   const filekey = crypto.randomBytes(16).toString('hex');
@@ -511,7 +511,7 @@ async function main() {
   await atomicWriteJson(PID_PATH, { pid: process.pid, started_at: startedAt }, 0o644);
 
   logStream = fs.createWriteStream(path.join(LOGS, 'daemon.log'), { flags: 'a' });
-  log(`daemon 启动 pid=${process.pid}（试用版 v1，零依赖）`);
+  log(`daemon 启动 pid=${process.pid}（v1.0，零依赖）`);
 
   // 心跳：每 5 秒写一次，供 keepalive / hook 判断死活
   setInterval(async () => {

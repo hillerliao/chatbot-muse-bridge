@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # chatbot-muse-bridge/dingtalk keepalive：daemon 死了就拉起来，活着就不动。
-# 由 hook 每 5 秒调一次，也可手动跑。只管本机试用版。
+# 由 hook 每 5 秒调一次，也可手动跑。只管本桥。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="$ROOT/state"

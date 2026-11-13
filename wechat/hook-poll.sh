@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 微信 iLink 试用版 hook：每 5 秒跑一次。
+# 微信 iLink hook：每 5 秒跑一次。
 # 1) 调 keepalive.sh，保证 daemon 活着（心跳停 90 秒就重拉）；
 # 2) inbox 里有没见过的新消息 -> wake，让 worker 回复；
 # 3) 其余情况 silent。

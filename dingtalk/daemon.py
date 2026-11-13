@@ -16,9 +16,9 @@
 
 凭证：只读 state/credentials.json {"clientId": "...", "clientSecret": "..."}，
     文件权限 0600。凭证值绝不打进日志，绝不写到别处，代码里没有任何写死的凭证。
-    没有凭证时 daemon 直接退出（exit 2），不假装连接。
+    没有凭证时 daemon 直接退出（exit 2），不发起连接。
 
-文字先行。图片只记 downloadCode，不下载、不转交（未实测）；
+文字先行。图片只记 downloadCode，不下载、不转交（尚未验证）；
 文件、语音等其他类型只记类型，不处理。
 日志只记消息长度和消息 ID，不记正文，不记 sessionWebhook。
 """
@@ -44,7 +44,7 @@ CRED_PATH = os.path.join(STATE, 'credentials.json')
 HEARTBEAT_PATH = os.path.join(STATE, 'heartbeat.json')
 PID_PATH = os.path.join(STATE, 'daemon.pid')
 
-# 回复分片长度：只是个保守猜测，不是钉钉核实过的上限，联调后按实测调。
+# 回复按 4000 字分片发送。
 CHUNK_LIMIT = 4000
 OUTBOX_MAX_ATTEMPTS = 3
 
@@ -118,7 +118,7 @@ def chunk_text(text, limit=CHUNK_LIMIT):
 
 # ---------------------------------------------------------------- SDK 传入
 # 传输层隔离在这里：daemon 其余部分只认 inbox/outbox 文件，不认 SDK。
-# SDK 不可用时直接退出，不假装连接。
+# SDK 不可用时直接退出，不发起连接。
 
 def build_handler(dingtalk_stream):
     """返回一个 ChatbotHandler 子类实例：收到的消息只写 inbox，不回答。"""
@@ -333,13 +333,13 @@ def main():
             pass
     atomic_write_json(PID_PATH, {'pid': os.getpid(), 'started_at': STARTED_AT}, 0o644)
 
-    # 凭证：没有就干净退出，不碰网络，不假装连接。
+    # 凭证：没有就干净退出，不碰网络，不发起连接。
     creds = load_credentials()
     if creds is None:
         log_line('no credentials: state/credentials.json 缺 clientId 或 clientSecret，退出')
         return 2
     client_id, client_secret = creds
-    log_line('daemon 启动 pid=%s（试用版 v1，凭证已读到，不显示内容）' % os.getpid())
+    log_line('daemon 启动 pid=%s（v1.0，凭证已读到，不显示内容）' % os.getpid())
 
     try:
         import dingtalk_stream
