@@ -133,8 +133,9 @@ client.register_callback_handler(ChatbotMessage.TOPIC, handler)
 ### 钉钉收发能力（已实测）
 
 - 收：文字；语音按钉钉服务端给的转写文字回（`recognition` 字段）；图片、视频、文件用 `downloadCode` 换临时链接下载到 `media/incoming/`，`inbox` 里记文件路径，Muse 能直接看；超过 20MB 的媒体不下载，只记原因。
-- 发：文字，按 4000 字分片发送。
+- 发：文字，按 4000 字分片发送；markdown：outbox 里 `kind="markdown"`，`title` 为卡片标题，`text` 里可用 `![alt](url)` 嵌图片——钉钉机器人回复通道本身不支持直接发图片文件，图片需先放到公开链接上再以 markdown 发出（2026-11-13 已实测：头像图在钉钉对话里直接显示出来）。
 - 回复走消息自带的 session webhook，约 90 分钟过期（2026-11-13 实测：收到后约 90 分钟）。Muse 回得太晚那条就发不出去，daemon 会归档到 `sent/` 并写明原因。
+- 去重：同一条消息已发过相同正文时，daemon 不会重发（`sent/` 里已有 `status=sent` 且 `text` 相同的记录时，本次任务归档为 `duplicate`）。
 
 ### 钉钉已知限制
 
