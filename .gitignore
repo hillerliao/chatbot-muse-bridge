@@ -1,0 +1,17 @@
+state/credentials.json
+state/daemon.pid
+state/heartbeat.json
+state/keepalive.lock
+state/last-start.txt
+state/qr.json
+state/login.json
+state/context-tokens.json
+logs/
+*.log
+inbox/
+outbox/
+processing/
+sent/
+media/
+.venv/
+__pycache__/
