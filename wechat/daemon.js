@@ -348,7 +348,7 @@ async function sendReply(token, userId, contextToken, text) {
 
 // ---------- 媒体发送（协议文档 §8：getuploadurl → AES-128-ECB → CDN upload → sendmessage） ----------
 // 图片/视频/文件走同一条上传路径，media_type 1=图片 2=视频 3=文件；
-// 语音（4）公开实现没有稳定的独立发送方法，不支持。
+// 语音发送（media_type 4）：公开实现没有稳定的独立发送方法，不支持发送；收语音走转写，不走这里。
 const MEDIA_TYPES = { image: 1, video: 2, file: 3 };
 
 function md5Hex(buf) { return crypto.createHash('md5').update(buf).digest('hex'); }
