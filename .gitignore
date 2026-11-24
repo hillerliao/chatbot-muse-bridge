@@ -15,3 +15,11 @@ sent/
 media/
 .venv/
 __pycache__/
+feishu/state/credentials.json
+feishu/inbox/
+feishu/outbox/
+feishu/processing/
+feishu/sent/
+feishu/media/
+feishu/.venv/
+feishu/__pycache__/
