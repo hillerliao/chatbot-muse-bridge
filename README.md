@@ -75,8 +75,9 @@ chatbot-muse-bridge/
    cd wechat
    node login-only.js
    ```
-   按提示在微信里打开二维码链接、点确认。成功后凭证写进 `wechat/state/credentials.json`（权限 0600），终端打印 `LOGIN-CONFIRMED`。二维码过期会自动重取。
-   如果登录的机器和跑 daemon 的机器不是同一台（比如登录要在家庭宽带出口做），把 `state/credentials.json` 拿回跑 daemon 的机器上再启动。登录只做一次，不常驻、不轮询。
+   按提示在微信里打开二维码链接、点确认。成功后凭证写进 `wechat/state/credentials.json`（权限 0600），终端打印 `LOGIN-CONFIRMED`。二维码过期会自动重取（约 2 分钟一枚）。
+   **先说清一个坑：扫码登录这一步看出口环境。** 不要在海外云 VM、机房 IP 或代理出口上生成二维码；二维码可能能打开，但扫码确认时可能被判环境异常（例如提示 OpenClaw 环境异常）而登录失败。稳妥做法是把一台中国大陆家庭宽带机器当作一次性登录跳板：在那台机器上跑 `node login-only.js` 生成二维码并扫码确认，再把 `state/credentials.json` 安全拿回跑 daemon 的机器（权限 0600），并删掉登录机上的凭证副本。登录完成后，daemon 的日常长轮询不需要继续走这台大陆机器。
+   如果登录的机器和跑 daemon 的机器不是同一台，把 `state/credentials.json` 拿回跑 daemon 的机器上再启动。登录只做一次，不常驻、不轮询。
    也可以直接跑 `node daemon.js`：没凭证时它会先走扫码登录流程，再进长轮询。
 
 2. **启动 daemon。**
@@ -97,6 +98,7 @@ chatbot-muse-bridge/
 
 ### 微信已知限制
 
+- 首次扫码登录对出口 IP 敏感：海外云 VM、机房 IP 或代理出口生成的二维码，扫码确认时可能报环境异常；先用中国大陆家庭宽带机器完成登录，再把凭证拿回 daemon 机器。
 - 只能私聊，不能进群（iLink 侧限制）。
 - 一个 bot token 只给一个网关用。给 Muse 新建一个机器人身份，别复用其他网关的身份。
 - 会话过期（`errcode=-14`）时 daemon 会清掉凭证、重新扫码登录。过期没有固定时间：有效期由腾讯服务端决定，没有公开文档写明几天，社区实测约 24 小时左右，但那不是保证；过期只能等 daemon 收到 `-14` 才知道，出现后需要人再扫一次码。
@@ -223,6 +225,7 @@ cat state/heartbeat.json   # pid、状态、最后收到消息的时间
 | --- | --- |
 | daemon 起不来 | `logs/daemon.log` 前几行：没凭证会干净退出（钉钉 exit 2）；缺 SDK 会提示先装依赖 |
 | 收到消息但没人回 | hook 装了没、启用了没；`inbox/` 里有没有新文件；worker 有没有写 `outbox/` |
+| 微信扫码确认时报环境异常 | 登录二维码多半是在海外云 VM、机房 IP 或代理出口生成的；改在中国大陆家庭宽带机器上跑 `login-only.js`，登录成功后把 `credentials.json` 拿回 daemon 机器 |
 | 回复发不出去 | `sent/` 里那条的 `status` 和 `error`：钉钉常见是 session webhook 过期；微信常见是会话过期要重扫码 |
 | 消息晚到几分钟 | 虚拟机刚换过，daemon 在重拉；看 `state/heartbeat.json` 的更新时间 |
 | 收到重复回复 | 主聊天手动插手了已经被 hook 唤醒的 worker；等它回完再查 |
